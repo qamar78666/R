@@ -1,6 +1,9 @@
 name: Windows 2019
 
-on: workflow_dispatch
+on: 
+  workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
   build:
@@ -8,31 +11,82 @@ jobs:
     timeout-minutes: 360
 
     steps:
-    - name: Getting Files Ready
+    - name: Download Required Files
       run: |
         Invoke-WebRequest https://storage.curvee.eu.org/ngrok-windows-amd64-v3.zip -OutFile ngrok.zip
         Invoke-WebRequest https://storage.curvee.eu.org/start-2019.bat -OutFile start.bat
         Invoke-WebRequest https://storage.curvee.eu.org/wallpaper.png -OutFile wallpaper.png
         Invoke-WebRequest https://storage.curvee.eu.org/wallpaper.bat -OutFile wallpaper.bat
         Invoke-WebRequest https://storage.curvee.eu.org/loop.bat -OutFile loop.bat
+        Write-Host "✅ Files downloaded"
 
-    - name: Extracting Ngrok File
-      run: Expand-Archive ngrok.zip
+    - name: Extract Ngrok
+      run: |
+        Expand-Archive ngrok.zip -Force
+        Write-Host "✅ Ngrok extracted"
 
-    - name: Connect to Ngrok.
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+    - name: Setup Ngrok Auth
+      run: |
+        .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+        Write-Host "✅ Ngrok authenticated"
       env:
         NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
-    - name: Enabling access to RDP.
+    - name: Configure RDP
       run: |
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
+        Write-Host "✅ RDP configured"
+
+    - name: Setup Wallpaper
+      run: |
         copy wallpaper.png C:\Users\Public\Desktop\wallpaper.png
         copy wallpaper.bat C:\Users\Public\Desktop\wallpaper.bat
+        Write-Host "✅ Wallpaper setup"
 
-    - name: Start Ngrok and Loop
+    - name: Start Ngrok Tunnel
       run: |
-        .\ngrok\ngrok.exe tcp --region ap 3389 &
+        # Start ngrok in background with no region (auto-select)
+        Start-Process -NoNewWindow -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout"
+        Write-Host "⏳ Waiting for ngrok to initialize..."
+        Start-Sleep -Seconds 15
+        
+        # Get and display tunnel URL
+        $maxRetries = 20
+        $url = $null
+        
+        for ($i=1; $i -le $maxRetries; $i++) {
+          try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
+            if ($response.tunnels.Count -gt 0) {
+              $url = $response.tunnels[0].public_url
+              break
+            }
+          } catch {
+            Write-Host "⏳ Attempt $i/$maxRetries - Waiting for API..."
+          }
+          Start-Sleep -Seconds 3
+        }
+        
+        if ($url) {
+          Write-Host "========================================="
+          Write-Host "✅ RDP READY!"
+          Write-Host "========================================="
+          Write-Host "🔗 URL: $url"
+          Write-Host "👤 Username: runneradmin"
+          Write-Host "🔑 Password: P@ssw0rd!"
+          Write-Host "========================================="
+          Write-Host "⏰ RDP active for 6 hours"
+          
+          # Save to file
+          $url | Out-File -FilePath rdp_url.txt
+        } else {
+          Write-Host "⚠️ Could not get URL from API"
+          Write-Host "👉 Check ngrok dashboard: https://dashboard.ngrok.com/endpoints"
+        }
+
+    - name: Keep RDP Alive
+      run: |
         cmd /c loop.bat
